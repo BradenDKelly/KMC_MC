@@ -32,6 +32,13 @@ from .waterbox import (
     delta_energy_rigid_move,
     apply_rigid_move,
 )
+from .lj_kmc import (
+    LJKMCrates,
+    compute_relocation_rates,
+    sample_event,
+    apply_relocation,
+    compute_widom_weights,
+)
 
 __all__ = [
     "minimum_image",
@@ -63,5 +70,10 @@ __all__ = [
     "total_energy_waterbox",
     "delta_energy_rigid_move",
     "apply_rigid_move",
+    "LJKMCrates",
+    "compute_relocation_rates",
+    "sample_event",
+    "apply_relocation",
+    "compute_widom_weights",
 ]
 
