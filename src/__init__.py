@@ -15,6 +15,14 @@ from .rigid import (
 )
 from .molecule import RigidMolecule
 from .water import make_spce_water
+from .ewald import (
+    EwaldParams,
+    EwaldCache,
+    ewald_energy_total,
+    build_cache,
+    delta_energy_move,
+    apply_move,
+)
 
 __all__ = [
     "minimum_image",
@@ -33,5 +41,11 @@ __all__ = [
     "rigid_body_move_proposal",
     "RigidMolecule",
     "make_spce_water",
+    "EwaldParams",
+    "EwaldCache",
+    "ewald_energy_total",
+    "build_cache",
+    "delta_energy_move",
+    "apply_move",
 ]
 
