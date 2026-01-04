@@ -4,6 +4,15 @@ from .utils import minimum_image, init_lattice
 from .lj import lj_shifted_energy, total_energy, delta_energy_particle_move
 from .mc import run_metropolis_mc
 from .kmc import run_equilibrium_kmc
+from .rigid import (
+    quaternion_normalize,
+    quaternion_multiply,
+    quaternion_conjugate,
+    quaternion_rotate_vector,
+    uniform_random_orientation,
+    apply_rigid_transform,
+    rigid_body_move_proposal,
+)
 
 __all__ = [
     "minimum_image",
@@ -13,5 +22,12 @@ __all__ = [
     "delta_energy_particle_move",
     "run_metropolis_mc",
     "run_equilibrium_kmc",
+    "quaternion_normalize",
+    "quaternion_multiply",
+    "quaternion_conjugate",
+    "quaternion_rotate_vector",
+    "uniform_random_orientation",
+    "apply_rigid_transform",
+    "rigid_body_move_proposal",
 ]
 
