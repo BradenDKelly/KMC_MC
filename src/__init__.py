@@ -14,6 +14,7 @@ from .rigid import (
     rigid_body_move_proposal,
 )
 from .molecule import RigidMolecule
+from .water import make_spce_water
 
 __all__ = [
     "minimum_image",
@@ -31,5 +32,6 @@ __all__ = [
     "apply_rigid_transform",
     "rigid_body_move_proposal",
     "RigidMolecule",
+    "make_spce_water",
 ]
 
