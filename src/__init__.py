@@ -13,6 +13,7 @@ from .rigid import (
     apply_rigid_transform,
     rigid_body_move_proposal,
 )
+from .molecule import RigidMolecule
 
 __all__ = [
     "minimum_image",
@@ -29,5 +30,6 @@ __all__ = [
     "uniform_random_orientation",
     "apply_rigid_transform",
     "rigid_body_move_proposal",
+    "RigidMolecule",
 ]
 
