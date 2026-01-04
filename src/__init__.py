@@ -23,6 +23,15 @@ from .ewald import (
     delta_energy_move,
     apply_move,
 )
+from .waterbox import (
+    WaterBox,
+    water_sites_lab,
+    flatten_sites,
+    oxygen_positions,
+    total_energy_waterbox,
+    delta_energy_rigid_move,
+    apply_rigid_move,
+)
 
 __all__ = [
     "minimum_image",
@@ -47,5 +56,12 @@ __all__ = [
     "build_cache",
     "delta_energy_move",
     "apply_move",
+    "WaterBox",
+    "water_sites_lab",
+    "flatten_sites",
+    "oxygen_positions",
+    "total_energy_waterbox",
+    "delta_energy_rigid_move",
+    "apply_rigid_move",
 ]
 
