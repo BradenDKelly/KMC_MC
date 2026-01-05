@@ -546,6 +546,11 @@ def main():
                     seed = args.seed + config_id * 1000 + run_id * 100
                     rng = np.random.default_rng(seed)
                     
+                    # Print run info: moves per sweep and per block
+                    moves_per_sweep = N  # One move per particle per sweep
+                    moves_per_block = moves_per_sweep * args.block
+                    print(f"  {engine.upper()} run {run_id}/{args.runs}: {moves_per_sweep} moves/sweep, {moves_per_block} moves/block")
+                    
                     # Initial positions
                     positions, L = make_initial_positions(N, rho, seed, method="lattice")
                     
@@ -604,6 +609,7 @@ def main():
                     print(f"  Production: {n_blocks} blocks...", flush=True)
                     for block_id in range(1, n_blocks + 1):
                         print(f"    Block {block_id}/{n_blocks}...", end=" ", flush=True)
+                        t_block_start = time.perf_counter()
                         if engine == "mc":
                             result = run_mc_block(
                                 positions, L, rc_val, T_val, step_val, args.block,
@@ -614,7 +620,9 @@ def main():
                                 positions, L, rc_val, T_val, args.block,
                                 nl, rng, args.widom_every, args.widom_insertions
                             )
-                        print("done", flush=True)
+                        t_block_end = time.perf_counter()
+                        block_time = t_block_end - t_block_start
+                        print(f"{block_time:.1f} seconds  Done", flush=True)
                         
                         # Store block values
                         U_block = result["U"] / N  # Per particle
