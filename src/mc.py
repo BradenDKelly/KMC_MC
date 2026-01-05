@@ -1,13 +1,15 @@
 """Metropolis NVT Monte Carlo simulation with Widom excess chemical potential."""
 
+from typing import Optional
 import numpy as np
 from .utils import init_lattice, minimum_image
 from .lj import total_energy, delta_energy_particle_move, lj_shifted_energy
+from .neighborlist import NeighborListConfig, NeighborList
 
 
 def run_metropolis_mc(N=256, rho=0.8, T=1.0, rc=2.5, max_disp=0.12,
                       n_equil=20_000, n_prod=50_000, sample_every=200,
-                      widom_inserts=500, seed=123):
+                      widom_inserts=500, seed=123, neighborlist: Optional[NeighborListConfig] = None):
     """Run Metropolis Monte Carlo NVT simulation with Widom excess chemical potential.
     
     Args:
@@ -21,6 +23,7 @@ def run_metropolis_mc(N=256, rho=0.8, T=1.0, rc=2.5, max_disp=0.12,
         sample_every: Sample energy and mu_ex every N steps
         widom_inserts: Number of test particle insertions per Widom estimate
         seed: Random seed
+        neighborlist: NeighborListConfig to enable neighbor list mode, or None for brute-force
         
     Returns:
         Dictionary with results:
@@ -37,6 +40,17 @@ def run_metropolis_mc(N=256, rho=0.8, T=1.0, rc=2.5, max_disp=0.12,
 
     x = init_lattice(N, L, rng)
     U = total_energy(x, L, rc)
+
+    # Initialize neighbor list if requested
+    nl = None
+    if neighborlist is not None:
+        try:
+            nl = NeighborList(x, L, rc, skin=neighborlist.skin)
+        except ImportError as e:
+            raise ImportError(
+                "Neighbor list mode requested but neighbor list backend is unavailable. "
+                "Install numba: pip install numba"
+            ) from e
 
     attempts = 0
     accepts = 0
@@ -65,11 +79,20 @@ def run_metropolis_mc(N=256, rho=0.8, T=1.0, rc=2.5, max_disp=0.12,
         i = rng.integers(N)
         disp = (rng.random(3)*2 - 1) * max_disp
         new_xi = (x[i] + disp) % L
-        dU = delta_energy_particle_move(i, new_xi, x, L, rc)
+        
+        # Compute energy change
+        if nl is not None:
+            dU = nl.delta_energy_particle_move(x, i, new_xi, L, rc)
+        else:
+            dU = delta_energy_particle_move(i, new_xi, x, L, rc)
+        
         if dU <= 0.0 or rng.random() < np.exp(-beta*dU):
             x[i] = new_xi
             U += dU
             accepts += 1
+            # Update neighbor list on accept
+            if nl is not None:
+                nl.update(x, force_rebuild=False)
 
     # Production
     for step in range(1, n_prod+1):
@@ -77,11 +100,20 @@ def run_metropolis_mc(N=256, rho=0.8, T=1.0, rc=2.5, max_disp=0.12,
         i = rng.integers(N)
         disp = (rng.random(3)*2 - 1) * max_disp
         new_xi = (x[i] + disp) % L
-        dU = delta_energy_particle_move(i, new_xi, x, L, rc)
+        
+        # Compute energy change
+        if nl is not None:
+            dU = nl.delta_energy_particle_move(x, i, new_xi, L, rc)
+        else:
+            dU = delta_energy_particle_move(i, new_xi, x, L, rc)
+        
         if dU <= 0.0 or rng.random() < np.exp(-beta*dU):
             x[i] = new_xi
             U += dU
             accepts += 1
+            # Update neighbor list on accept
+            if nl is not None:
+                nl.update(x, force_rebuild=False)
 
         if step % sample_every == 0:
             U_samples.append(U / N)

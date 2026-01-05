@@ -4,6 +4,7 @@ This module provides a Python interface to the numba-accelerated neighbor list,
 with automatic tracking of particle displacements and rebuild criteria.
 """
 
+from dataclasses import dataclass
 import numpy as np
 from .backend import require_numba, NUMBA_AVAILABLE
 from .utils import minimum_image
@@ -15,6 +16,16 @@ if NUMBA_AVAILABLE:
         virial_pressure_nl_numba,
         delta_energy_particle_move_nl_numba,
     )
+
+
+@dataclass(frozen=True)
+class NeighborListConfig:
+    """Configuration for neighbor list usage in MC simulations.
+    
+    Args:
+        skin: Skin distance for rebuild criterion (rebuild when max displacement > skin/2)
+    """
+    skin: float
 
 
 class NeighborList:
