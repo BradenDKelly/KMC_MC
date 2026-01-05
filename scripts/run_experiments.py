@@ -20,10 +20,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.neighborlist import NeighborListConfig, NeighborList, NUMBA_AVAILABLE
 from src.lj_numba import total_energy_numba as total_energy_fast, virial_pressure_numba as virial_pressure_fast
-from src.lj import total_energy, virial_pressure, delta_energy_particle_move, lj_shifted_energy
+from src.lj import total_energy, virial_pressure, lj_shifted_energy
 from src.lj_kmc import compute_relocation_rates, sample_event, apply_relocation
 from src.utils import init_lattice, minimum_image
 from src.backend import require_numba
+from src.mc import advance_mc_sweeps
 
 
 def compute_widom_mu_ex(positions, L, rc, beta, n_insertions, rng):
@@ -136,7 +137,7 @@ def sample_observables(positions, L, rc, T):
 
 
 def run_mc_block(positions, L, rc, T, max_disp, n_sweeps, nl, rng, widom_every, widom_insertions):
-    """Run MC for one block.
+    """Run MC for one block using optimized stepping via src.mc.advance_mc_sweeps.
     
     Args:
         positions: Particle positions, shape (N, 3) (modified in place)
@@ -153,32 +154,29 @@ def run_mc_block(positions, L, rc, T, max_disp, n_sweeps, nl, rng, widom_every, 
     Returns:
         dict with keys: U, P, mu_ex_samples, acceptance, n_events
     """
+    require_numba("MC stepping")
     N = positions.shape[0]
     beta = 1.0 / T
-    attempts = 0
-    accepts = 0
     mu_ex_samples = []
+    total_attempts = 0
+    total_accepts = 0
     
-    for sweep in range(n_sweeps):
-        for _ in range(N):
-            attempts += 1
-            i = rng.integers(N)
-            disp = (rng.random(3) * 2 - 1) * max_disp
-            new_pos = (positions[i] + disp) % L
-            
-            if nl is not None:
-                dU = nl.delta_energy_particle_move(positions, i, new_pos, L, rc)
-            else:
-                dU = delta_energy_particle_move(i, new_pos, positions, L, rc)
-            
-            if dU <= 0.0 or rng.random() < np.exp(-beta * dU):
-                positions[i] = new_pos
-                accepts += 1
-                if nl is not None:
-                    nl.update(positions, force_rebuild=False)
+    # Run in chunks to preserve Widom sampling cadence
+    remaining = n_sweeps
+    sweep_count = 0
+    
+    while remaining > 0:
+        chunk = min(widom_every, remaining)
         
-        # Widom sampling
-        if (sweep + 1) % widom_every == 0:
+        # Advance MC by chunk sweeps
+        result = advance_mc_sweeps(positions, L, rc, T, max_disp, chunk, nl, rng)
+        total_attempts += result["attempts"]
+        total_accepts += result["accepts"]
+        sweep_count += chunk
+        remaining -= chunk
+        
+        # Widom sampling after chunk
+        if sweep_count % widom_every == 0:
             mu_ex = compute_widom_mu_ex(positions, L, rc, beta, widom_insertions, rng)
             mu_ex_samples.append(mu_ex)
     
@@ -189,8 +187,8 @@ def run_mc_block(positions, L, rc, T, max_disp, n_sweeps, nl, rng, widom_every, 
         "U": obs["U"],
         "P": obs["P"],
         "mu_ex_samples": mu_ex_samples,
-        "acceptance": accepts / max(attempts, 1),
-        "n_events": attempts,
+        "acceptance": total_accepts / max(total_attempts, 1),
+        "n_events": total_attempts,
     }
 
 
@@ -418,6 +416,7 @@ def main():
                     # Burn-in
                     print(f"  {engine.upper()} run {run_id}/{args.runs}: burn-in...", end=" ", flush=True)
                     if engine == "mc":
+                        print("(MC stepping via src.mc.advance_mc_sweeps, Numba required)", end=" ", flush=True)
                         _ = run_mc_block(
                             positions, L, args.rc, T, args.step, args.burnin,
                             nl, rng, args.widom_every, args.widom_insertions
