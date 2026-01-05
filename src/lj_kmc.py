@@ -60,7 +60,11 @@ def compute_relocation_rates(positions, L, rc, beta, rng):
 
 
 def sample_event(kmc_rates, rng):
-    """Sample a relocation event proportional to its rate.
+    """Sample a relocation event proportional to its rate (rejection-free).
+    
+    This is a rejection-free kMC step: events are selected with probability
+    proportional to their rates, and the selected event MUST be applied
+    (acceptance = 1.0). There is NO accept/reject branch based on exp(-beta*ΔU).
     
     Args:
         kmc_rates: LJKMCrates instance
@@ -70,26 +74,38 @@ def sample_event(kmc_rates, rng):
         Event tuple: (particle_index, new_position)
     """
     total_rate = np.sum(kmc_rates.rates)
+    # DIAGNOSTIC: Total rate must be positive (rejection-free kMC requirement)
     if total_rate <= 0:
         raise ValueError("Total rate is non-positive")
+    assert np.isfinite(total_rate), f"Total rate must be finite, got {total_rate}"
     
-    # Sample proportional to rates
+    # Event selection: sample proportional to rates (rejection-free)
+    # Normalized probabilities: p_i = rates[i] / total_rate, sum(p_i) = 1
     cumsum = np.cumsum(kmc_rates.rates)
     u = rng.random() * total_rate
     idx = int(np.searchsorted(cumsum, u))
+    
+    # DIAGNOSTIC: Verify selection is within valid range
+    assert 0 <= idx < len(kmc_rates.events), f"Selected event index {idx} out of range [0, {len(kmc_rates.events)})"
     
     return kmc_rates.events[idx]
 
 
 def apply_relocation(positions, event, L):
-    """Apply relocation event.
+    """Apply relocation event (rejection-free: event is ALWAYS applied).
+    
+    In rejection-free kMC, the selected event from sample_event() is ALWAYS
+    applied. There is NO accept/reject branch - acceptance probability = 1.0.
     
     Args:
         positions: Particle positions, shape (N, 3) (modified in place)
-        event: Event tuple (i, new_pos)
+        event: Event tuple (i, new_pos) from sample_event()
         L: Box length
     """
     i, new_pos = event
+    # ALWAYS APPLY EVENT (rejection-free requirement: no accept/reject branch)
+    # This function should be called immediately after sample_event() with no
+    # conditional logic based on exp(-beta*ΔU) or similar acceptance criteria.
     positions[i] = new_pos % L
 
 
