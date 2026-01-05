@@ -9,6 +9,7 @@ import argparse
 import csv
 import json
 import itertools
+import os
 import subprocess
 import sys
 import time
@@ -311,24 +312,49 @@ def run_kmc_block(positions, L, rc, T, n_sweeps, nl, rng, widom_every, widom_ins
     }
 
 
-def get_git_hash():
-    """Get git commit hash if available."""
+def get_git_hash(no_git=False):
+    """Get git commit hash if available.
+    
+    Args:
+        no_git: If True, skip git hash retrieval and return "SKIPPED"
+    
+    Returns:
+        Git hash string, "SKIPPED" if no_git=True, or None if git unavailable
+    """
+    if no_git:
+        return "SKIPPED"
+    
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
+            timeout=5.0,  # Timeout after 5 seconds to avoid hangs
             cwd=Path(__file__).parent.parent
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except:
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
         pass
     return None
 
 
-def get_metadata(args):
-    """Generate metadata dictionary."""
+def get_metadata(args, no_git=False):
+    """Generate metadata dictionary.
+    
+    Args:
+        args: Parsed arguments
+        no_git: If True, skip git hash retrieval
+    
+    Returns:
+        Metadata dictionary (only small scalars/strings/lists, no large arrays)
+    """
+    # Get git hash with timing
+    t_git_start = time.perf_counter()
+    git_hash = get_git_hash(no_git=no_git)
+    t_git_end = time.perf_counter()
+    git_time = t_git_end - t_git_start
+    
     metadata = {
         "timestamp": datetime.now().isoformat(),
         "python_version": sys.version,
@@ -337,7 +363,6 @@ def get_metadata(args):
     }
     
     # Git hash
-    git_hash = get_git_hash()
     if git_hash:
         metadata["git_hash"] = git_hash
     
@@ -349,7 +374,32 @@ def get_metadata(args):
         except:
             pass
     
-    return metadata
+    # Ensure metadata doesn't contain large arrays
+    # Remove any numpy arrays or large objects
+    metadata_clean = {}
+    for key, value in metadata.items():
+        if isinstance(value, np.ndarray):
+            # Skip numpy arrays
+            continue
+        elif isinstance(value, dict):
+            # Recursively check dict values
+            clean_dict = {}
+            for k, v in value.items():
+                if not isinstance(v, (np.ndarray, list)) or (isinstance(v, list) and len(v) < 1000):
+                    # Keep small lists, skip large ones
+                    if isinstance(v, list) and len(v) > 0:
+                        # Check if list contains arrays
+                        if any(isinstance(item, np.ndarray) for item in v):
+                            continue
+                    clean_dict[k] = v
+            metadata_clean[key] = clean_dict
+        elif isinstance(value, list) and len(value) > 1000:
+            # Skip very large lists
+            continue
+        else:
+            metadata_clean[key] = value
+    
+    return metadata_clean, git_time
 
 
 def main():
@@ -423,6 +473,10 @@ def main():
         "--runs", type=int, default=3,
         help="Number of replicate runs per state point (default: 3)"
     )
+    parser.add_argument(
+        "--no-git", action="store_true",
+        help="Skip git hash retrieval (faster, avoids potential subprocess hangs)"
+    )
     
     args = parser.parse_args()
     
@@ -450,6 +504,7 @@ def main():
     
     # CSV file
     csv_path = outdir / "results.csv"
+    csv_tmp_path = outdir / "results.csv.tmp"
     fieldnames = [
         "engine", "use_neighborlist", "N", "rho", "T", "rc", "skin",
         "seed", "run_id", "block_id",
@@ -459,9 +514,16 @@ def main():
         "steps_per_second", "wall_time_run_s", "effective_steps_per_second"
     ]
     
-    with open(csv_path, "w", newline="") as csvfile:
+    # CSV file setup (timing starts after header write)
+    rows_written = 0
+    
+    csvfile = open(csv_tmp_path, "w", newline="")
+    try:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        t_csv_header_start = time.perf_counter()
         writer.writeheader()
+        t_csv_header_end = time.perf_counter()
+        t_csv_write = t_csv_header_end - t_csv_header_start  # Start with header time
         
         # Cartesian product of state points
         engines = []
@@ -539,7 +601,9 @@ def main():
                     acceptance_blocks = []  # Track acceptance per block (MC only)
                     total_n_events = 0  # Track total events for run
                     
+                    print(f"  Production: {n_blocks} blocks...", flush=True)
                     for block_id in range(1, n_blocks + 1):
+                        print(f"    Block {block_id}/{n_blocks}...", end=" ", flush=True)
                         if engine == "mc":
                             result = run_mc_block(
                                 positions, L, rc_val, T_val, step_val, args.block,
@@ -550,6 +614,7 @@ def main():
                                 positions, L, rc_val, T_val, args.block,
                                 nl, rng, args.widom_every, args.widom_insertions
                             )
+                        print("done", flush=True)
                         
                         # Store block values
                         U_block = result["U"] / N  # Per particle
@@ -595,7 +660,11 @@ def main():
                             "wall_time_run_s": None,  # Will be filled in summary row
                             "effective_steps_per_second": None,  # Will be filled in summary row
                         }
+                        t_row_start = time.perf_counter()
                         writer.writerow(row)
+                        t_row_end = time.perf_counter()
+                        t_csv_write += (t_row_end - t_row_start)
+                        rows_written += 1
                     
                     # Summary row (block_id = -1)
                     # Compute overall statistics using blocking
@@ -648,11 +717,37 @@ def main():
                         "wall_time_run_s": wall_time_run_s,
                         "effective_steps_per_second": effective_steps_per_second,
                     }
+                    t_summary_start = time.perf_counter()
                     writer.writerow(summary_row)
+                    t_summary_end = time.perf_counter()
+                    t_csv_write += (t_summary_end - t_summary_start)
                     
                     # Store per-run timing for metadata
                     run_timings.append(wall_time_run_s)
                     warmup_timings.append(t_warmup)
+        
+        # Close CSV and perform atomic write
+        t_flush_start = time.perf_counter()
+        csvfile.flush()
+        os.fsync(csvfile.fileno())
+        csvfile.close()
+        t_flush_end = time.perf_counter()
+        t_csv_write += (t_flush_end - t_flush_start)
+        
+        # Atomic rename for CSV
+        t_rename_start = time.perf_counter()
+        try:
+            os.replace(csv_tmp_path, csv_path)
+        except Exception as e:
+            # Fallback: copy if replace fails
+            import shutil
+            shutil.copy2(csv_tmp_path, csv_path)
+            csv_tmp_path.unlink()
+        t_rename_end = time.perf_counter()
+        t_csv_write += (t_rename_end - t_rename_start)
+    except Exception as e:
+        csvfile.close()
+        raise
     
     # Final timing
     t_script_end = time.perf_counter()
@@ -660,18 +755,43 @@ def main():
     wall_time_total_s = t_script_end - t_script_start
     
     # Write metadata (with timing information)
-    metadata = get_metadata(args)
-    metadata["wall_time_total_s"] = wall_time_total_s
-    metadata["wall_time_per_run_s"] = run_timings
-    metadata["numba_warmup_time_s"] = warmup_timings if warmup_timings else [0.0] * len(run_timings)
+    print("  Building metadata...", end=" ", flush=True)
+    t_meta_build_start = time.perf_counter()
+    metadata, git_time = get_metadata(args, no_git=args.no_git)
+    # Add timing information (ensure these are small scalars/lists)
+    metadata["wall_time_total_s"] = float(wall_time_total_s)
+    metadata["wall_time_per_run_s"] = [float(t) for t in run_timings]
+    metadata["numba_warmup_time_s"] = [float(t) for t in (warmup_timings if warmup_timings else [0.0] * len(run_timings))]
     metadata["timestamp_start"] = timestamp_start
     metadata["timestamp_end"] = timestamp_end
-    with open(outdir / "metadata.json", "w") as f:
+    t_meta_build_end = time.perf_counter()
+    t_meta_build = t_meta_build_end - t_meta_build_start
+    print(f"done ({t_meta_build:.3f}s)", flush=True)
+    
+    # Atomic write for metadata
+    print("  Writing metadata.json...", end=" ", flush=True)
+    t_meta_write_start = time.perf_counter()
+    metadata_tmp_path = outdir / "metadata.json.tmp"
+    with open(metadata_tmp_path, "w") as f:
         json.dump(metadata, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    metadata_path = outdir / "metadata.json"
+    try:
+        os.replace(metadata_tmp_path, metadata_path)
+    except Exception as e:
+        # Fallback: copy if replace fails
+        import shutil
+        shutil.copy2(metadata_tmp_path, metadata_path)
+        metadata_tmp_path.unlink()
+    t_meta_write_end = time.perf_counter()
+    t_meta_write = t_meta_write_end - t_meta_write_start
+    print(f"done ({t_meta_write:.3f}s)", flush=True)
     
     print()
     print(f"Results written to: {csv_path}")
-    print(f"Metadata written to: {outdir / 'metadata.json'}")
+    print(f"Metadata written to: {metadata_path}")
+    print(f"Output write timings: csv={t_csv_write:.3f}s, json={t_meta_write:.3f}s, git={git_time:.3f}s")
     print("Done!")
 
 
