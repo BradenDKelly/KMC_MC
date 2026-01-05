@@ -11,6 +11,7 @@ import json
 import itertools
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -166,7 +167,7 @@ def run_mc_block(positions, L, rc, T, max_disp, n_sweeps, nl, rng, widom_every, 
         widom_insertions: Number of insertions per Widom estimate
         
     Returns:
-        dict with keys: U, P, mu_ex_samples, acceptance, n_events
+        dict with keys: U, P, mu_ex_samples, acceptance, n_events, wall_time_block_s, wall_time_widom_s, wall_time_total_s
     """
     require_numba("MC stepping")
     # Ensure positions are float64, contiguous for Numba
@@ -183,6 +184,11 @@ def run_mc_block(positions, L, rc, T, max_disp, n_sweeps, nl, rng, widom_every, 
     total_attempts = 0
     total_accepts = 0
     
+    # Timing
+    t_block_start = time.perf_counter()
+    t_step_total = 0.0
+    t_widom_total = 0.0
+    
     # Run in chunks to preserve Widom sampling cadence
     remaining = n_sweeps
     sweep_count = 0
@@ -191,7 +197,10 @@ def run_mc_block(positions, L, rc, T, max_disp, n_sweeps, nl, rng, widom_every, 
         chunk = min(widom_every, remaining)
         
         # Advance MC by chunk sweeps
+        t_step_start = time.perf_counter()
         result = advance_mc_sweeps(positions, L, rc, T, max_disp, chunk, nl, rng)
+        t_step_end = time.perf_counter()
+        t_step_total += (t_step_end - t_step_start)
         total_attempts += result["attempts"]
         total_accepts += result["accepts"]
         sweep_count += chunk
@@ -199,11 +208,21 @@ def run_mc_block(positions, L, rc, T, max_disp, n_sweeps, nl, rng, widom_every, 
         
         # Widom sampling after chunk
         if sweep_count % widom_every == 0:
+            t_widom_start = time.perf_counter()
             mu_ex = compute_widom_mu_ex(positions, L, rc, beta, widom_insertions, rng)
+            t_widom_end = time.perf_counter()
+            t_widom_total += (t_widom_end - t_widom_start)
             mu_ex_samples.append(mu_ex)
     
     # Compute observables at end of block
+    t_obs_start = time.perf_counter()
     obs = sample_observables(positions, L, rc, T)
+    t_obs_end = time.perf_counter()
+    
+    t_block_end = time.perf_counter()
+    wall_time_block_s = t_step_total  # Stepping only
+    wall_time_widom_s = t_widom_total
+    wall_time_total_s = t_block_end - t_block_start
     
     return {
         "U": obs["U"],
@@ -211,6 +230,9 @@ def run_mc_block(positions, L, rc, T, max_disp, n_sweeps, nl, rng, widom_every, 
         "mu_ex_samples": mu_ex_samples,
         "acceptance": total_accepts / max(total_attempts, 1),
         "n_events": total_attempts,
+        "wall_time_block_s": wall_time_block_s,
+        "wall_time_widom_s": wall_time_widom_s,
+        "wall_time_total_s": wall_time_total_s,
     }
 
 
@@ -229,7 +251,7 @@ def run_kmc_block(positions, L, rc, T, n_sweeps, nl, rng, widom_every, widom_ins
         widom_insertions: Number of insertions per Widom estimate
         
     Returns:
-        dict with keys: U, P, mu_ex_samples, n_events
+        dict with keys: U, P, mu_ex_samples, n_events, wall_time_block_s, wall_time_widom_s, wall_time_total_s
     """
     # Ensure float64, contiguous for Numba
     positions = np.ascontiguousarray(positions, dtype=np.float64)
@@ -241,8 +263,14 @@ def run_kmc_block(positions, L, rc, T, n_sweeps, nl, rng, widom_every, widom_ins
     beta = float(1.0 / T)
     mu_ex_samples = []
     
+    # Timing
+    t_block_start = time.perf_counter()
+    t_step_total = 0.0
+    t_widom_total = 0.0
+    
     for sweep in range(n_sweeps):
         # Compute rates once per sweep
+        t_step_start = time.perf_counter()
         kmc_rates = compute_relocation_rates(positions, L, rc, beta, rng, nl=nl)
         
         # Apply N events
@@ -251,20 +279,35 @@ def run_kmc_block(positions, L, rc, T, n_sweeps, nl, rng, widom_every, widom_ins
             apply_relocation(positions, event, L)
             if nl is not None:
                 nl.rebuild(positions)  # Force rebuild after relocation
+        t_step_end = time.perf_counter()
+        t_step_total += (t_step_end - t_step_start)
         
         # Widom sampling
         if (sweep + 1) % widom_every == 0:
+            t_widom_start = time.perf_counter()
             mu_ex = compute_widom_mu_ex(positions, L, rc, beta, widom_insertions, rng)
+            t_widom_end = time.perf_counter()
+            t_widom_total += (t_widom_end - t_widom_start)
             mu_ex_samples.append(mu_ex)
     
     # Compute observables at end of block
+    t_obs_start = time.perf_counter()
     obs = sample_observables(positions, L, rc, T)
+    t_obs_end = time.perf_counter()
+    
+    t_block_end = time.perf_counter()
+    wall_time_block_s = t_step_total  # Stepping only
+    wall_time_widom_s = t_widom_total
+    wall_time_total_s = t_block_end - t_block_start
     
     return {
         "U": obs["U"],
         "P": obs["P"],
         "mu_ex_samples": mu_ex_samples,
         "n_events": n_sweeps * N,
+        "wall_time_block_s": wall_time_block_s,
+        "wall_time_widom_s": wall_time_widom_s,
+        "wall_time_total_s": wall_time_total_s,
     }
 
 
@@ -310,6 +353,13 @@ def get_metadata(args):
 
 
 def main():
+    # Global timing
+    t_script_start = time.perf_counter()
+    timestamp_start = datetime.now().isoformat()
+    
+    # Per-run timing lists (will be populated during runs)
+    run_timings = []
+    warmup_timings = []
     parser = argparse.ArgumentParser(
         description="Run LJ simulations and log observables with block-based statistics"
     )
@@ -385,11 +435,6 @@ def main():
     
     outdir.mkdir(parents=True, exist_ok=True)
     
-    # Write metadata
-    metadata = get_metadata(args)
-    with open(outdir / "metadata.json", "w") as f:
-        json.dump(metadata, f, indent=2)
-    
     print(f"Output directory: {outdir}")
     print(f"Engines: {args.engine}")
     print(f"State points: {len(args.N)} x {len(args.rho)} x {len(args.T)} = {len(args.N) * len(args.rho) * len(args.T)}")
@@ -409,7 +454,9 @@ def main():
         "engine", "use_neighborlist", "N", "rho", "T", "rc", "skin",
         "seed", "run_id", "block_id",
         "U_mean", "P_mean", "mu_ex_mean", "mu_ex_stderr",
-        "acceptance", "n_widom_samples", "n_events"
+        "acceptance", "n_widom_samples", "n_events",
+        "wall_time_block_s", "wall_time_widom_s", "wall_time_total_s",
+        "steps_per_second", "wall_time_run_s", "effective_steps_per_second"
     ]
     
     with open(csv_path, "w", newline="") as csvfile:
@@ -430,6 +477,10 @@ def main():
             
             for engine in engines:
                 for run_id in range(1, args.runs + 1):
+                    # Per-run timing
+                    t_run_start = time.perf_counter()
+                    t_warmup = 0.0
+                    
                     seed = args.seed + config_id * 1000 + run_id * 100
                     rng = np.random.default_rng(seed)
                     
@@ -450,6 +501,7 @@ def main():
                     # Warmup Numba JIT before burn-in (MC only)
                     if engine == "mc":
                         print(f"  {engine.upper()} run {run_id}/{args.runs}: Warming up Numba JIT...", end=" ", flush=True)
+                        t_warmup_start = time.perf_counter()
                         # Warmup: run 1 sweep with current positions and same mode
                         warmup_pos = positions.copy()
                         warmup_result = advance_mc_sweeps(
@@ -461,17 +513,19 @@ def main():
                             _ = compute_widom_mu_ex(
                                 warmup_pos, L, rc_val, beta, 1, rng
                             )
+                        t_warmup_end = time.perf_counter()
+                        t_warmup = t_warmup_end - t_warmup_start
                         print("done", flush=True)
                     
                     # Burn-in
                     print(f"  {engine.upper()} run {run_id}/{args.runs}: burn-in...", end=" ", flush=True)
                     if engine == "mc":
-                        _ = run_mc_block(
+                        burnin_result = run_mc_block(
                             positions, L, rc_val, T_val, step_val, args.burnin,
                             nl, rng, args.widom_every, args.widom_insertions
                         )
                     else:  # kmc
-                        _ = run_kmc_block(
+                        burnin_result = run_kmc_block(
                             positions, L, rc_val, T_val, args.burnin,
                             nl, rng, args.widom_every, args.widom_insertions
                         )
@@ -483,6 +537,7 @@ def main():
                     U_block_values = []  # Track U per block (per particle)
                     P_block_values = []  # Track P per block
                     acceptance_blocks = []  # Track acceptance per block (MC only)
+                    total_n_events = 0  # Track total events for run
                     
                     for block_id in range(1, n_blocks + 1):
                         if engine == "mc":
@@ -501,6 +556,7 @@ def main():
                         P_block = result["P"]
                         U_block_values.append(U_block)
                         P_block_values.append(P_block)
+                        total_n_events += result["n_events"]
                         
                         if "acceptance" in result:
                             acceptance_blocks.append(result["acceptance"])
@@ -509,6 +565,9 @@ def main():
                         mu_ex_mean_block = np.mean(result["mu_ex_samples"]) if result["mu_ex_samples"] else np.nan
                         mu_ex_stderr_block = np.std(result["mu_ex_samples"], ddof=1) / np.sqrt(len(result["mu_ex_samples"])) if len(result["mu_ex_samples"]) > 1 else np.nan
                         block_mu_samples.extend(result["mu_ex_samples"])
+                        
+                        # Compute steps_per_second
+                        steps_per_second = result["n_events"] / result["wall_time_block_s"] if result["wall_time_block_s"] > 0 else np.nan
                         
                         # Write block row
                         row = {
@@ -529,6 +588,12 @@ def main():
                             "acceptance": result.get("acceptance", np.nan),
                             "n_widom_samples": len(result["mu_ex_samples"]),
                             "n_events": result["n_events"],
+                            "wall_time_block_s": result["wall_time_block_s"],
+                            "wall_time_widom_s": result["wall_time_widom_s"],
+                            "wall_time_total_s": result["wall_time_total_s"],
+                            "steps_per_second": steps_per_second,
+                            "wall_time_run_s": None,  # Will be filled in summary row
+                            "effective_steps_per_second": None,  # Will be filled in summary row
                         }
                         writer.writerow(row)
                     
@@ -549,6 +614,15 @@ def main():
                     
                     acceptance_mean = np.mean(acceptance_blocks) if acceptance_blocks else np.nan
                     
+                    # Per-run timing
+                    t_run_end = time.perf_counter()
+                    wall_time_run_s = t_run_end - t_run_start
+                    
+                    # Total events (burn-in + production)
+                    burnin_events = burnin_result.get("n_events", 0)
+                    total_events_run = burnin_events + total_n_events
+                    effective_steps_per_second = total_events_run / wall_time_run_s if wall_time_run_s > 0 else np.nan
+                    
                     summary_row = {
                         "engine": engine,
                         "use_neighborlist": use_nl,
@@ -566,9 +640,34 @@ def main():
                         "mu_ex_stderr": mu_ex_se,
                         "acceptance": acceptance_mean,
                         "n_widom_samples": len(block_mu_samples),
-                        "n_events": n_blocks * args.block * N,
+                        "n_events": total_events_run,
+                        "wall_time_block_s": None,  # Not applicable for summary
+                        "wall_time_widom_s": None,  # Not applicable for summary
+                        "wall_time_total_s": None,  # Not applicable for summary
+                        "steps_per_second": None,  # Not applicable for summary
+                        "wall_time_run_s": wall_time_run_s,
+                        "effective_steps_per_second": effective_steps_per_second,
                     }
                     writer.writerow(summary_row)
+                    
+                    # Store per-run timing for metadata
+                    run_timings.append(wall_time_run_s)
+                    warmup_timings.append(t_warmup)
+    
+    # Final timing
+    t_script_end = time.perf_counter()
+    timestamp_end = datetime.now().isoformat()
+    wall_time_total_s = t_script_end - t_script_start
+    
+    # Write metadata (with timing information)
+    metadata = get_metadata(args)
+    metadata["wall_time_total_s"] = wall_time_total_s
+    metadata["wall_time_per_run_s"] = run_timings
+    metadata["numba_warmup_time_s"] = warmup_timings if warmup_timings else [0.0] * len(run_timings)
+    metadata["timestamp_start"] = timestamp_start
+    metadata["timestamp_end"] = timestamp_end
+    with open(outdir / "metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
     
     print()
     print(f"Results written to: {csv_path}")
