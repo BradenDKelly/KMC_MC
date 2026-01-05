@@ -31,27 +31,33 @@ def compute_widom_mu_ex(positions, L, rc, beta, n_insertions, rng):
     """Compute Widom excess chemical potential via test particle insertion.
     
     Args:
-        positions: Particle positions, shape (N, 3)
-        L: Box length
-        rc: Cutoff distance
-        beta: Inverse temperature
+        positions: Particle positions, shape (N, 3) (must be float64, contiguous)
+        L: Box length (float64)
+        rc: Cutoff distance (float64)
+        beta: Inverse temperature (float64)
         n_insertions: Number of test particle insertions
         rng: Random number generator
         
     Returns:
         Excess chemical potential mu_ex = -kT * ln(<exp(-beta*dU_ins)>)
     """
+    # Ensure float64, contiguous for consistency
+    positions = np.ascontiguousarray(positions, dtype=np.float64)
+    L = float(L)
+    rc = float(rc)
+    beta = float(beta)
+    
     N = positions.shape[0]
-    T = 1.0 / beta
-    rc2 = rc * rc
+    T = float(1.0 / beta)
+    rc2 = float(rc * rc)
     
     weights = []
     for _ in range(n_insertions):
-        x_test = rng.random(3) * L
+        x_test = rng.random(3, dtype=np.float64) * L
         dU_ins = 0.0
         for j in range(N):
             dr = minimum_image(x_test - positions[j], L)
-            r2 = np.dot(dr, dr)
+            r2 = float(np.dot(dr, dr))
             if r2 < rc2:
                 dU_ins += lj_shifted_energy(r2, rc2)
         weights.append(np.exp(-beta * dU_ins))
@@ -103,18 +109,20 @@ def make_initial_positions(N, rho, seed, method="lattice"):
         method: "lattice" or "random"
         
     Returns:
-        (positions, L)
+        (positions, L) where positions is float64, contiguous, C-order
     """
     rng = np.random.default_rng(seed)
-    L = (N / rho) ** (1/3)
+    L = float((N / rho) ** (1/3))  # Ensure float64
     
     if method == "lattice":
         positions = init_lattice(N, L, rng)
-        positions += rng.random((N, 3)) * 0.1
+        positions += rng.random((N, 3), dtype=np.float64) * 0.1
     else:
-        positions = rng.random((N, 3)) * L
+        positions = rng.random((N, 3), dtype=np.float64) * L
     
     positions = positions % L
+    # Ensure float64, contiguous, C-order for Numba
+    positions = np.ascontiguousarray(positions, dtype=np.float64)
     return positions, L
 
 
@@ -122,14 +130,20 @@ def sample_observables(positions, L, rc, T):
     """Compute observables for current configuration.
     
     Args:
-        positions: Particle positions, shape (N, 3)
-        L: Box length
-        rc: Cutoff distance
-        T: Temperature
+        positions: Particle positions, shape (N, 3) (must be float64, contiguous)
+        L: Box length (float64)
+        rc: Cutoff distance (float64)
+        T: Temperature (float64)
         
     Returns:
         dict with keys: U, P
     """
+    # Ensure float64, contiguous for Numba
+    positions = np.ascontiguousarray(positions, dtype=np.float64)
+    L = float(L)
+    rc = float(rc)
+    T = float(T)
+    
     U = total_energy_fast(positions, L, rc)
     P = virial_pressure_fast(positions, L, rc, T)
     
@@ -140,11 +154,11 @@ def run_mc_block(positions, L, rc, T, max_disp, n_sweeps, nl, rng, widom_every, 
     """Run MC for one block using optimized stepping via src.mc.advance_mc_sweeps.
     
     Args:
-        positions: Particle positions, shape (N, 3) (modified in place)
-        L: Box length
-        rc: Cutoff distance
-        T: Temperature
-        max_disp: Maximum displacement
+        positions: Particle positions, shape (N, 3) (modified in place, must be float64, contiguous)
+        L: Box length (float64)
+        rc: Cutoff distance (float64)
+        T: Temperature (float64)
+        max_disp: Maximum displacement (float64)
         n_sweeps: Number of sweeps in this block
         nl: NeighborList instance or None
         rng: Random number generator
@@ -155,8 +169,16 @@ def run_mc_block(positions, L, rc, T, max_disp, n_sweeps, nl, rng, widom_every, 
         dict with keys: U, P, mu_ex_samples, acceptance, n_events
     """
     require_numba("MC stepping")
+    # Ensure positions are float64, contiguous for Numba
+    positions = np.ascontiguousarray(positions, dtype=np.float64)
+    # Ensure scalars are float64
+    L = float(L)
+    rc = float(rc)
+    T = float(T)
+    max_disp = float(max_disp)
+    
     N = positions.shape[0]
-    beta = 1.0 / T
+    beta = float(1.0 / T)
     mu_ex_samples = []
     total_attempts = 0
     total_accepts = 0
@@ -196,10 +218,10 @@ def run_kmc_block(positions, L, rc, T, n_sweeps, nl, rng, widom_every, widom_ins
     """Run kMC relocation for one block.
     
     Args:
-        positions: Particle positions, shape (N, 3) (modified in place)
-        L: Box length
-        rc: Cutoff distance
-        T: Temperature
+        positions: Particle positions, shape (N, 3) (modified in place, must be float64, contiguous)
+        L: Box length (float64)
+        rc: Cutoff distance (float64)
+        T: Temperature (float64)
         n_sweeps: Number of sweeps in this block
         nl: NeighborList instance or None
         rng: Random number generator
@@ -209,8 +231,14 @@ def run_kmc_block(positions, L, rc, T, n_sweeps, nl, rng, widom_every, widom_ins
     Returns:
         dict with keys: U, P, mu_ex_samples, n_events
     """
+    # Ensure float64, contiguous for Numba
+    positions = np.ascontiguousarray(positions, dtype=np.float64)
+    L = float(L)
+    rc = float(rc)
+    T = float(T)
+    
     N = positions.shape[0]
-    beta = 1.0 / T
+    beta = float(1.0 / T)
     mu_ex_samples = []
     
     for sweep in range(n_sweeps):
@@ -408,22 +436,43 @@ def main():
                     # Initial positions
                     positions, L = make_initial_positions(N, rho, seed, method="lattice")
                     
+                    # Ensure scalars are float64 (for Numba dtype stability)
+                    L = float(L)
+                    rc_val = float(args.rc)
+                    T_val = float(T)
+                    step_val = float(args.step)
+                    
                     # Initialize neighbor list if requested
                     nl = None
                     if use_nl:
-                        nl = NeighborList(positions, L, args.rc, skin=args.neighborlist_skin)
+                        nl = NeighborList(positions, L, rc_val, skin=float(args.neighborlist_skin))
+                    
+                    # Warmup Numba JIT before burn-in (MC only)
+                    if engine == "mc":
+                        print(f"  {engine.upper()} run {run_id}/{args.runs}: Warming up Numba JIT...", end=" ", flush=True)
+                        # Warmup: run 1 sweep with current positions and same mode
+                        warmup_pos = positions.copy()
+                        warmup_result = advance_mc_sweeps(
+                            warmup_pos, L, rc_val, T_val, step_val, 1, nl, rng
+                        )
+                        # Warmup Widom if enabled
+                        if args.widom_insertions > 0:
+                            beta = float(1.0 / T_val)
+                            _ = compute_widom_mu_ex(
+                                warmup_pos, L, rc_val, beta, 1, rng
+                            )
+                        print("done", flush=True)
                     
                     # Burn-in
                     print(f"  {engine.upper()} run {run_id}/{args.runs}: burn-in...", end=" ", flush=True)
                     if engine == "mc":
-                        print("(MC stepping via src.mc.advance_mc_sweeps, Numba required)", end=" ", flush=True)
                         _ = run_mc_block(
-                            positions, L, args.rc, T, args.step, args.burnin,
+                            positions, L, rc_val, T_val, step_val, args.burnin,
                             nl, rng, args.widom_every, args.widom_insertions
                         )
                     else:  # kmc
                         _ = run_kmc_block(
-                            positions, L, args.rc, T, args.burnin,
+                            positions, L, rc_val, T_val, args.burnin,
                             nl, rng, args.widom_every, args.widom_insertions
                         )
                     print("done")
@@ -438,12 +487,12 @@ def main():
                     for block_id in range(1, n_blocks + 1):
                         if engine == "mc":
                             result = run_mc_block(
-                                positions, L, args.rc, T, args.step, args.block,
+                                positions, L, rc_val, T_val, step_val, args.block,
                                 nl, rng, args.widom_every, args.widom_insertions
                             )
                         else:  # kmc
                             result = run_kmc_block(
-                                positions, L, args.rc, T, args.block,
+                                positions, L, rc_val, T_val, args.block,
                                 nl, rng, args.widom_every, args.widom_insertions
                             )
                         

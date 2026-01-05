@@ -18,11 +18,11 @@ def advance_mc_sweeps(positions, L, rc, T, max_disp, n_sweeps, nl, rng):
     delta_energy_particle_move_numba in brute-force mode for performance.
     
     Args:
-        positions: Particle positions, shape (N, 3) (modified in place)
-        L: Box length
-        rc: Cutoff distance
-        T: Temperature
-        max_disp: Maximum displacement
+        positions: Particle positions, shape (N, 3) (modified in place, must be float64, contiguous)
+        L: Box length (float64)
+        rc: Cutoff distance (float64)
+        T: Temperature (float64)
+        max_disp: Maximum displacement (float64)
         n_sweeps: Number of sweeps to advance
         nl: NeighborList instance or None
         rng: Random number generator
@@ -31,17 +31,24 @@ def advance_mc_sweeps(positions, L, rc, T, max_disp, n_sweeps, nl, rng):
         dict with keys: attempts, accepts, acceptance
     """
     require_numba("MC stepping")
+    # Ensure float64, contiguous for Numba (prevents recompilation)
+    positions = np.ascontiguousarray(positions, dtype=np.float64)
+    L = float(L)
+    rc = float(rc)
+    T = float(T)
+    max_disp = float(max_disp)
+    
     N = positions.shape[0]
-    beta = 1.0 / T
-    rc2 = rc * rc
+    beta = float(1.0 / T)
+    rc2 = float(rc * rc)
     attempts = 0
     accepts = 0
     
     for _ in range(n_sweeps):
         for _ in range(N):
             attempts += 1
-            i = rng.integers(N)
-            disp = (rng.random(3) * 2 - 1) * max_disp
+            i = int(rng.integers(N))  # Ensure int64
+            disp = (rng.random(3, dtype=np.float64) * 2 - 1) * max_disp
             new_pos = (positions[i] + disp) % L
             
             # Compute energy change
