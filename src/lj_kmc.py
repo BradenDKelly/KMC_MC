@@ -1,7 +1,7 @@
 """Equilibrium kinetic Monte Carlo for Lennard-Jones particles."""
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import numpy as np
 from .lj import delta_energy_particle_move, lj_shifted_energy
 from .utils import minimum_image
@@ -19,7 +19,7 @@ class LJKMCrates:
     events: List[Tuple[int, np.ndarray]]  # (particle_index, new_position)
 
 
-def compute_relocation_rates(positions, L, rc, beta, rng):
+def compute_relocation_rates(positions, L, rc, beta, rng, nl=None):
     """Compute relocation rates for all particles (Do/Ustinov style).
     
     For each particle i, propose a random new position uniform in box
@@ -33,6 +33,7 @@ def compute_relocation_rates(positions, L, rc, beta, rng):
         rc: Cutoff distance
         beta: Inverse temperature (1/kT)
         rng: Random number generator
+        nl: Optional NeighborList instance for NL-accelerated energy computation
         
     Returns:
         LJKMCrates instance
@@ -47,7 +48,10 @@ def compute_relocation_rates(positions, L, rc, beta, rng):
         new_pos = rng.random(3) * L
         
         # Compute energy change
-        dU = delta_energy_particle_move(i, new_pos, positions, L, rc)
+        if nl is not None:
+            dU = nl.delta_energy_particle_move(positions, i, new_pos, L, rc)
+        else:
+            dU = delta_energy_particle_move(i, new_pos, positions, L, rc)
         
         # Rate using Barker rule: rate = exp(-beta * dU / 2)
         # Clip to avoid overflow
