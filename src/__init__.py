@@ -1,5 +1,6 @@
 """KMC_MC: Monte Carlo and Kinetic Monte Carlo simulations for Lennard-Jones fluids."""
 
+from .backend import NUMBA_AVAILABLE, require_numba
 from .utils import minimum_image, init_lattice
 from .lj import (
     lj_shifted_energy,

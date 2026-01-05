@@ -1,0 +1,10 @@
+# Development dependencies
+# Install with: pip install -r requirements-dev.txt
+
+# Core dependencies (also installs base requirements)
+-r requirements.txt
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0
+

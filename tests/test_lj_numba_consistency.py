@@ -1,18 +1,25 @@
-"""Test consistency between numba-accelerated and Python reference implementations."""
+"""Test consistency between numba-accelerated and Python reference implementations.
+
+These tests verify that numba kernels produce the same results as Python reference
+implementations. Numba is required to run these tests.
+"""
 
 import numpy as np
 import pytest
 from src.utils import init_lattice
+from src.backend import require_numba, NUMBA_AVAILABLE
 from src.lj import total_energy, virial_pressure, delta_energy_particle_move
 from src.lj_numba import (
     total_energy_numba,
     virial_pressure_numba,
     delta_energy_particle_move_numba,
-    NUMBA_AVAILABLE,
 )
 
 
-@pytest.mark.skipif(not NUMBA_AVAILABLE, reason="numba not available")
+@pytest.fixture(autouse=True)
+def require_numba_fixture():
+    """Require numba for all tests in this module."""
+    require_numba("Numba consistency tests")
 def test_total_energy_consistency():
     """Test that numba total_energy matches Python reference."""
     rng = np.random.default_rng(42)

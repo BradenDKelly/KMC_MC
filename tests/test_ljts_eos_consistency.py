@@ -16,11 +16,11 @@ Two test strategies:
 import numpy as np
 import pytest
 from src.utils import init_lattice, minimum_image
-from src.lj import (
-    lj_shifted_energy,
-    total_energy,
-    delta_energy_particle_move,
-    virial_pressure,
+from src.backend import require_numba
+from src.lj_numba import (
+    total_energy_numba as total_energy_fast,
+    virial_pressure_numba as virial_pressure_fast,
+    delta_energy_particle_move_numba as delta_energy_particle_move_fast,
 )
 from src.lj_kmc import (
     compute_relocation_rates,
@@ -29,19 +29,13 @@ from src.lj_kmc import (
 )
 from src.eos import u_res, P, mu_res
 
-# Try to import numba-accelerated versions (gracefully degrade if not available)
-try:
-    from src.lj_numba import (
-        total_energy_numba,
-        virial_pressure_numba,
-        delta_energy_particle_move_numba,
-    )
-    NUMBA_AVAILABLE = total_energy_numba is not None
-except (ImportError, AttributeError):
-    NUMBA_AVAILABLE = False
-    total_energy_numba = None
-    virial_pressure_numba = None
-    delta_energy_particle_move_numba = None
+# For correctness testing only (not used in simulation loops)
+from src.lj import (
+    lj_shifted_energy,
+    total_energy,
+    virial_pressure,
+    delta_energy_particle_move,
+)
 
 
 def blocked_standard_error(samples, block_size):
@@ -115,16 +109,19 @@ def compute_widom_mu_ex_single_config(positions, L, rc, beta, n_insertions, rng)
     return mu_ex
 
 
-def run_metropolis_mc_sampler(positions, L, rc, beta, max_disp, n_sweeps, rng, sample_stride=1, use_numba=False):
+def run_metropolis_mc_sampler(positions, L, rc, beta, max_disp, n_sweeps, rng, sample_stride=1):
     """Metropolis MC sampler with local translation moves.
+    
+    Uses numba-accelerated kernels for performance. Numba is required.
     
     Args:
         sample_stride: Sample observables every N sweeps (default: every sweep)
-        use_numba: If True and numba available, use numba-accelerated kernels
     
     Returns:
         U_samples, P_samples, mu_samples: Lists of sampled values (one per sample_stride sweeps)
     """
+    require_numba("MC/kMC samplers")
+    
     N = positions.shape[0]
     rc2 = rc * rc
     U_samples = []
@@ -133,16 +130,6 @@ def run_metropolis_mc_sampler(positions, L, rc, beta, max_disp, n_sweeps, rng, s
     T = 1.0 / beta
     n_widom_insertions = 20  # Fixed for test
     
-    # Choose functions (numba if available and requested, else Python)
-    if use_numba and NUMBA_AVAILABLE:
-        total_energy_fn = total_energy_numba
-        virial_pressure_fn = virial_pressure_numba
-        delta_energy_fn = delta_energy_particle_move_numba
-    else:
-        total_energy_fn = total_energy
-        virial_pressure_fn = virial_pressure
-        delta_energy_fn = delta_u_particle_move
-    
     for sweep in range(n_sweeps):
         for _ in range(N):
             i = rng.integers(N)
@@ -150,15 +137,15 @@ def run_metropolis_mc_sampler(positions, L, rc, beta, max_disp, n_sweeps, rng, s
             disp = (rng.random(3) - 0.5) * 2 * max_disp
             new_pos = (old_pos + disp) % L
             
-            dU = delta_energy_fn(positions, i, new_pos, L, rc2)
+            dU = delta_energy_particle_move_fast(positions, i, new_pos, L, rc2)
             if dU <= 0.0 or rng.random() < np.exp(-beta * dU):
                 positions[i] = new_pos
         
         # Sample observables only every sample_stride sweeps
         if (sweep + 1) % sample_stride == 0:
-            U = total_energy_fn(positions, L, rc)
+            U = total_energy_fast(positions, L, rc)
             U_samples.append(U / N)
-            P_inst = virial_pressure_fn(positions, L, rc, T)
+            P_inst = virial_pressure_fast(positions, L, rc, T)
             P_samples.append(P_inst)
             mu_ex = compute_widom_mu_ex_single_config(positions, L, rc, beta, n_widom_insertions, rng)
             mu_samples.append(mu_ex)
@@ -169,12 +156,16 @@ def run_metropolis_mc_sampler(positions, L, rc, beta, max_disp, n_sweeps, rng, s
 def run_kmc_sampler(positions, L, rc, beta, n_sweeps, rng, sample_stride=1):
     """Do/Ustinov kMC relocation sampler.
     
+    Uses numba-accelerated kernels for performance. Numba is required.
+    
     Args:
         sample_stride: Sample observables every N sweeps (default: every sweep)
     
     Returns:
         U_samples, P_samples, mu_samples: Lists of sampled values (one per sample_stride sweeps)
     """
+    require_numba("MC/kMC samplers")
+    
     N = positions.shape[0]
     U_samples = []
     P_samples = []
@@ -193,9 +184,9 @@ def run_kmc_sampler(positions, L, rc, beta, n_sweeps, rng, sample_stride=1):
         
         # Sample observables only every sample_stride sweeps
         if (sweep + 1) % sample_stride == 0:
-            U = total_energy(positions, L, rc)
+            U = total_energy_fast(positions, L, rc)
             U_samples.append(U / N)
-            P_inst = virial_pressure(positions, L, rc, T)
+            P_inst = virial_pressure_fast(positions, L, rc, T)
             P_samples.append(P_inst)
             mu_ex = compute_widom_mu_ex_single_config(positions, L, rc, beta, n_widom_insertions, rng)
             mu_samples.append(mu_ex)
@@ -209,7 +200,10 @@ def test_mc_kmc_small_n_regression():
     Validates that Metropolis MC and Do/Ustinov kMC samplers produce consistent
     equilibrium properties (U/N, Z, μ_ex) within statistical uncertainty.
     No EOS comparisons here (finite-size effects are large at N=32).
+    
+    Requires numba for performance.
     """
+    require_numba("MC/kMC regression test")
     
     # Single state point
     T, rho = 1.3, 0.5
@@ -345,13 +339,13 @@ def test_ljts_eos_validation():
     rng_init = np.random.default_rng(30000 + int(T * 100) + int(rho * 100) + N)
     
     # MC run only (kMC is slower at larger N, MC is sufficient for EOS validation)
-    # Use numba acceleration if available to speed up large-N test
+    require_numba("EOS validation test")
     positions_mc = init_lattice(N, L, rng_init)
     run_metropolis_mc_sampler(
-        positions_mc, L, rc, beta, max_disp, burnin_sweeps, rng_mc, sample_stride, use_numba=NUMBA_AVAILABLE
+        positions_mc, L, rc, beta, max_disp, burnin_sweeps, rng_mc, sample_stride
     )
     U_samples_mc, P_samples_mc, mu_samples_mc = run_metropolis_mc_sampler(
-        positions_mc, L, rc, beta, max_disp, prod_sweeps, rng_mc, sample_stride, use_numba=NUMBA_AVAILABLE
+        positions_mc, L, rc, beta, max_disp, prod_sweeps, rng_mc, sample_stride
     )
     
     # Compute blocked statistics
