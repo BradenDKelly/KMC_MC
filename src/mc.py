@@ -9,13 +9,15 @@ from .backend import require_numba, NUMBA_AVAILABLE
 
 if NUMBA_AVAILABLE:
     from .lj_numba import delta_energy_particle_move_numba
+    from .mc_numba import mc_sweeps_bruteforce_numba
 
 
 def advance_mc_sweeps(positions, L, rc, T, max_disp, n_sweeps, nl, rng):
     """Advance MC simulation by n_sweeps sweeps (optimized stepping function).
     
     This is the core MC stepping logic extracted for reuse. Uses Numba-accelerated
-    delta_energy_particle_move_numba in brute-force mode for performance.
+    sweep kernel for brute-force mode (processes entire sweeps in compiled code).
+    Uses neighbor-list stepping for NL mode.
     
     Args:
         positions: Particle positions, shape (N, 3) (modified in place, must be float64, contiguous)
@@ -41,34 +43,50 @@ def advance_mc_sweeps(positions, L, rc, T, max_disp, n_sweeps, nl, rng):
     N = positions.shape[0]
     beta = float(1.0 / T)
     rc2 = float(rc * rc)
-    attempts = 0
-    accepts = 0
     
-    for _ in range(n_sweeps):
-        for _ in range(N):
-            attempts += 1
-            i = int(rng.integers(N))  # Ensure int64
-            disp = (rng.random(3, dtype=np.float64) * 2 - 1) * max_disp
-            new_pos = (positions[i] + disp) % L
-            
-            # Compute energy change
-            if nl is not None:
+    if nl is not None:
+        # Neighbor list mode: use existing per-move stepping
+        attempts = 0
+        accepts = 0
+        
+        for _ in range(n_sweeps):
+            for _ in range(N):
+                attempts += 1
+                i = int(rng.integers(N))  # Ensure int64
+                disp = (rng.random(3, dtype=np.float64) * 2 - 1) * max_disp
+                new_pos = (positions[i] + disp) % L
+                
                 dU = nl.delta_energy_particle_move(positions, i, new_pos, L, rc)
-            else:
-                # Use Numba-accelerated version for brute-force mode
-                dU = delta_energy_particle_move_numba(positions, i, new_pos, L, rc2)
-            
-            if dU <= 0.0 or rng.random() < np.exp(-beta * dU):
-                positions[i] = new_pos
-                accepts += 1
-                if nl is not None:
+                
+                if dU <= 0.0 or rng.random() < np.exp(-beta * dU):
+                    positions[i] = new_pos
+                    accepts += 1
                     nl.update(positions, force_rebuild=False)
-    
-    return {
-        "attempts": attempts,
-        "accepts": accepts,
-        "acceptance": accepts / max(attempts, 1),
-    }
+        
+        return {
+            "attempts": attempts,
+            "accepts": accepts,
+            "acceptance": accepts / max(attempts, 1),
+        }
+    else:
+        # Brute-force mode: use compiled sweep kernel
+        # Pre-generate all random numbers in Python (keeps reproducibility)
+        displacements = (rng.random((n_sweeps, N, 3), dtype=np.float64) * 2 - 1) * max_disp
+        uniforms = rng.random((n_sweeps, N), dtype=np.float64)
+        # Generate particle indices (random selection per move, matching current behavior)
+        particle_indices = rng.integers(0, N, size=(n_sweeps, N), dtype=np.int64)
+        
+        # Call compiled kernel once for all sweeps
+        n_accept, n_attempt = mc_sweeps_bruteforce_numba(
+            positions, L, rc2, beta, max_disp,
+            displacements, uniforms, particle_indices
+        )
+        
+        return {
+            "attempts": n_attempt,
+            "accepts": n_accept,
+            "acceptance": n_accept / max(n_attempt, 1),
+        }
 
 
 def run_metropolis_mc(N=256, rho=0.8, T=1.0, rc=2.5, max_disp=0.12,
