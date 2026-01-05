@@ -8,7 +8,8 @@ of potential neighbors for each particle.
 """
 
 import numpy as np
-from .backend import njit, NUMBA_AVAILABLE
+from numba import njit
+from .backend import NUMBA_AVAILABLE
 
 if not NUMBA_AVAILABLE:
     def _raise_numba_error():
@@ -64,128 +65,177 @@ else:
         return F
 
     @njit(cache=True)
+    def _neighbor_counts_celllist_numba(positions, L, rc2, cell_size, cell_width,
+                                        cell_starts, sorted_particles, neighbor_counts):
+        N = positions.shape[0]
+
+        for i in range(N):
+            neighbor_counts[i] = 0
+
+        for i in range(N):
+            pos_i = positions[i]
+
+            cx_i = int(np.floor(pos_i[0] / cell_width))
+            cy_i = int(np.floor(pos_i[1] / cell_width))
+            cz_i = int(np.floor(pos_i[2] / cell_width))
+            if cx_i >= cell_size:
+                cx_i = cell_size - 1
+            if cy_i >= cell_size:
+                cy_i = cell_size - 1
+            if cz_i >= cell_size:
+                cz_i = cell_size - 1
+
+            for dx in range(-1, 2):
+                nx = cx_i + dx
+                if nx < 0 or nx >= cell_size:
+                    continue
+                for dy in range(-1, 2):
+                    ny = cy_i + dy
+                    if ny < 0 or ny >= cell_size:
+                        continue
+                    for dz in range(-1, 2):
+                        nz = cz_i + dz
+                        if nz < 0 or nz >= cell_size:
+                            continue
+
+                        cell_idx = nx + ny * cell_size + nz * cell_size * cell_size
+                        start = cell_starts[cell_idx]
+                        end = cell_starts[cell_idx + 1]
+
+                        for idx in range(start, end):
+                            j = sorted_particles[idx]
+                            if j <= i:
+                                continue
+
+                            dr = pos_i - positions[j]
+                            dr = minimum_image_scalar(dr, L)
+                            r2 = dr[0]*dr[0] + dr[1]*dr[1] + dr[2]*dr[2]
+                            if r2 < rc2:
+                                neighbor_counts[i] += 1
+
+    @njit(cache=True)
+    def _neighbor_fill_celllist_numba_with_writepos(positions, L, rc2, cell_size, cell_width,
+                                                   cell_starts, sorted_particles,
+                                                   neighbor_starts, write_pos, neighbor_list):
+        N = positions.shape[0]
+
+        for i in range(N):
+            write_pos[i] = neighbor_starts[i]
+
+        for i in range(N):
+            pos_i = positions[i]
+
+            cx_i = int(np.floor(pos_i[0] / cell_width))
+            cy_i = int(np.floor(pos_i[1] / cell_width))
+            cz_i = int(np.floor(pos_i[2] / cell_width))
+            if cx_i >= cell_size:
+                cx_i = cell_size - 1
+            if cy_i >= cell_size:
+                cy_i = cell_size - 1
+            if cz_i >= cell_size:
+                cz_i = cell_size - 1
+
+            for dx in range(-1, 2):
+                nx = cx_i + dx
+                if nx < 0 or nx >= cell_size:
+                    continue
+                for dy in range(-1, 2):
+                    ny = cy_i + dy
+                    if ny < 0 or ny >= cell_size:
+                        continue
+                    for dz in range(-1, 2):
+                        nz = cz_i + dz
+                        if nz < 0 or nz >= cell_size:
+                            continue
+
+                        cell_idx = nx + ny * cell_size + nz * cell_size * cell_size
+                        start = cell_starts[cell_idx]
+                        end = cell_starts[cell_idx + 1]
+
+                        for idx in range(start, end):
+                            j = sorted_particles[idx]
+                            if j <= i:
+                                continue
+
+                            dr = pos_i - positions[j]
+                            dr = minimum_image_scalar(dr, L)
+                            r2 = dr[0]*dr[0] + dr[1]*dr[1] + dr[2]*dr[2]
+                            if r2 < rc2:
+                                p = write_pos[i]
+                                neighbor_list[p] = j
+                                write_pos[i] = p + 1
+
     def build_neighbor_list_numba(positions, L, rc2):
-        """Build neighbor list using cell list method.
-        
-        Uses a cell list to efficiently find all pairs within cutoff.
-        Returns neighbor list in CSR (Compressed Sparse Row) format:
-        - neighbor_list: Flat array of neighbor indices
-        - neighbor_starts: Starting index in neighbor_list for each particle (length N+1)
-        
-        Args:
-            positions: Particle positions, shape (N, 3), in [0, L)
-            L: Box length
-            rc2: Squared cutoff distance
-            
-        Returns:
-            neighbor_list: Flat array of neighbor particle indices
-            neighbor_starts: Starting indices for each particle, shape (N+1,)
+        """
+        Python wrapper: builds cell list in Python, allocates arrays in Python,
+        then calls numba kernels to count/fill neighbor CSR arrays.
         """
         N = positions.shape[0]
-        rc = np.sqrt(rc2)
-        
-        # Build cell list
-        # Cell size should be >= rc to ensure all neighbors are in adjacent cells
-        cell_size = max(1, int(np.floor(L / rc)))
+        rc = float(np.sqrt(rc2))
+
+        cell_size = int(np.floor(L / rc))
         if cell_size < 1:
             cell_size = 1
         n_cells = cell_size * cell_size * cell_size
         cell_width = L / cell_size
-        
-        # Assign particles to cells
-        # cell_particles[cell_idx] will contain list of particle indices in that cell
-        # Use a simple approach: count particles per cell, then assign
+
+        # Build cell list in Python (allocations here are safe)
         cell_counts = np.zeros(n_cells, dtype=np.int32)
         cell_indices = np.zeros(N, dtype=np.int32)
-        
+
         for i in range(N):
             cx = int(np.floor(positions[i, 0] / cell_width))
             cy = int(np.floor(positions[i, 1] / cell_width))
             cz = int(np.floor(positions[i, 2] / cell_width))
-            cx = min(cx, cell_size - 1)
-            cy = min(cy, cell_size - 1)
-            cz = min(cz, cell_size - 1)
+            if cx >= cell_size:
+                cx = cell_size - 1
+            if cy >= cell_size:
+                cy = cell_size - 1
+            if cz >= cell_size:
+                cz = cell_size - 1
             cell_idx = cx + cy * cell_size + cz * cell_size * cell_size
             cell_indices[i] = cell_idx
             cell_counts[cell_idx] += 1
-        
-        # Build cell_starts (prefix sum)
+
         cell_starts = np.zeros(n_cells + 1, dtype=np.int32)
         for c in range(n_cells):
             cell_starts[c + 1] = cell_starts[c] + cell_counts[c]
-        
-        # Sort particles by cell
+
         sorted_particles = np.zeros(N, dtype=np.int32)
         cell_pos = np.zeros(n_cells, dtype=np.int32)
         for i in range(N):
-            cell_idx = cell_indices[i]
-            pos = cell_starts[cell_idx] + cell_pos[cell_idx]
+            c = cell_indices[i]
+            pos = cell_starts[c] + cell_pos[c]
             sorted_particles[pos] = i
-            cell_pos[cell_idx] += 1
-        
-        # Count total neighbors (estimate: assume average density)
-        # We'll build neighbor list directly
-        # Use a conservative estimate: worst case is all pairs
-        max_total_neighbors = N * (N - 1) // 2
-        neighbor_list = np.zeros(max_total_neighbors, dtype=np.int32)
+            cell_pos[c] += 1
+
+        # Pass 1: counts
+        neighbor_counts = np.zeros(N, dtype=np.int32)
+        _neighbor_counts_celllist_numba(
+            positions, L, rc2, cell_size, cell_width,
+            cell_starts, sorted_particles, neighbor_counts
+        )
+
+        # Prefix sum in Python
         neighbor_starts = np.zeros(N + 1, dtype=np.int32)
-        neighbor_count = 0
-        
-        # Build neighbor list by iterating over cells
+        total = 0
         for i in range(N):
-            pos_i = positions[i]
-            neighbor_starts[i] = neighbor_count
-            
-            # Get cell of particle i
-            cx_i = int(np.floor(pos_i[0] / cell_width))
-            cy_i = int(np.floor(pos_i[1] / cell_width))
-            cz_i = int(np.floor(pos_i[2] / cell_width))
-            cx_i = min(cx_i, cell_size - 1)
-            cy_i = min(cy_i, cell_size - 1)
-            cz_i = min(cz_i, cell_size - 1)
-            
-            # Check 27 neighboring cells (including self)
-            for dx in range(-1, 2):
-                for dy in range(-1, 2):
-                    for dz in range(-1, 2):
-                        cx = (cx_i + dx) % cell_size
-                        cy = (cy_i + dy) % cell_size
-                        cz = (cz_i + dz) % cell_size
-                        if cx < 0:
-                            cx += cell_size
-                        if cy < 0:
-                            cy += cell_size
-                        if cz < 0:
-                            cz += cell_size
-                        
-                        cell_idx = cx + cy * cell_size + cz * cell_size * cell_size
-                        
-                        # Iterate over particles in this cell
-                        start = cell_starts[cell_idx]
-                        end = cell_starts[cell_idx + 1]
-                        
-                        for idx in range(start, end):
-                            j = sorted_particles[idx]
-                            if j <= i:  # Only consider j > i to avoid double counting
-                                continue
-                            
-                            # Check distance
-                            dr = pos_i - positions[j]
-                            dr = minimum_image_scalar(dr, L)
-                            r2 = dr[0]*dr[0] + dr[1]*dr[1] + dr[2]*dr[2]
-                            
-                            if r2 < rc2:
-                                neighbor_list[neighbor_count] = j
-                                neighbor_count += 1
-        
-        neighbor_starts[N] = neighbor_count
-        
-        # Compact neighbor_list to actual size
-        neighbor_list_compact = np.zeros(neighbor_count, dtype=np.int32)
-        for i in range(neighbor_count):
-            neighbor_list_compact[i] = neighbor_list[i]
-        
-        return neighbor_list_compact, neighbor_starts
+            neighbor_starts[i] = total
+            total += int(neighbor_counts[i])
+        neighbor_starts[N] = total
+
+        # Allocate neighbor list + write_pos in Python
+        neighbor_list = np.empty(total, dtype=np.int32)
+        write_pos = np.empty(N, dtype=np.int32)
+
+        # Pass 2: fill
+        _neighbor_fill_celllist_numba_with_writepos(
+            positions, L, rc2, cell_size, cell_width,
+            cell_starts, sorted_particles,
+            neighbor_starts, write_pos, neighbor_list
+        )
+
+        return neighbor_list, neighbor_starts
 
     @njit(cache=True)
     def total_energy_nl_numba(positions, neighbor_list, neighbor_starts, L, rc2):

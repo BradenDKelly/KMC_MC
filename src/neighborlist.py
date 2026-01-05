@@ -6,6 +6,7 @@ with automatic tracking of particle displacements and rebuild criteria.
 
 import numpy as np
 from .backend import require_numba, NUMBA_AVAILABLE
+from .utils import minimum_image
 
 if NUMBA_AVAILABLE:
     from .neighborlist_numba import (
@@ -58,15 +59,15 @@ class NeighborList:
         Returns:
             True if max displacement > skin/2, False otherwise
         """
-        # Compute maximum displacement since last rebuild
+        # Compute maximum displacement since last rebuild using minimum image convention
         dr = positions - self.positions_ref
-        # Apply minimum image convention
-        half_L = 0.5 * self.L
-        dr = dr - self.L * np.floor((dr + half_L) / self.L)
+        dr = minimum_image(dr, self.L)
         
-        max_displacement = np.max(np.linalg.norm(dr, axis=1))
+        # Compute displacement magnitudes
+        disp = np.sqrt(np.sum(dr * dr, axis=1))
+        max_disp = np.max(disp)
         
-        return max_displacement > (self.skin / 2.0)
+        return max_disp > 0.5 * self.skin
     
     def rebuild(self, positions):
         """Rebuild neighbor list from current positions.
@@ -145,4 +146,6 @@ class NeighborList:
         return delta_energy_particle_move_nl_numba(
             positions, i, new_pos, self.neighbor_list, self.neighbor_starts, L, self.rc2
         )
+
+
 
